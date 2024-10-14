@@ -1,0 +1,52 @@
+openapi: 3.0.0
+info:
+  title: "Cards APIs"
+  description: CDN POC
+  version: 1.0.1
+x-amazon-apigateway-request-validators:
+  all:
+    validateRequestBody: true
+x-amazon-apigateway-request-validator: all
+paths:
+
+  /v1/manage-card-templates:
+    get:
+      summary: Get Card Template
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      x-amazon-apigateway-integration:
+        type: AWS_PROXY
+        httpMethod: POST
+        passthroughBehavior: WHEN_NO_MATCH
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ManageCardTemplateLambda.Arn}/invocations
+        responses:
+          default:
+            statusCode: "200"
+      security:
+        - api_key: []
+    post:
+      summary: Create Card Template
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      x-amazon-apigateway-integration:
+        type: AWS_PROXY
+        httpMethod: POST
+        passthroughBehavior: WHEN_NO_MATCH
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ManageCardTemplateLambda.Arn}/invocations
+        responses:
+          default:
+            statusCode: "200"
+      security:
+        - api_key: []
+
+securityDefinitions:
+  api_key:
+    type: "apiKey"
+    name: "x-api-key"
+    in: "header"

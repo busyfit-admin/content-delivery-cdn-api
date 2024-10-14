@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: API to serve content from CDN with signed URLs
+
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The runtime environment of this stack
+  MapBurstLimit:
+    Type: Number
+    Default: 100
+  MapRateLimit:
+    Type: Number
+    Default: 100
+  MapThrottlingLimit:
+    Type: Number
+    Default: 100
+  MapThrottlingBurstLimit:
+    Type: Number
+    Default: 100
+
+
+Resources:
+
+  
+  # Public Key is created manually and the value is referred to it accordingly.
+  CloudFrontPublicKeyId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${AWS::StackName}/cloudfront/public-key-id
+      Type: String
+      Value: K366XUGU8FUVOJ
+  # ---------- API gateway ----------
+
+  CardsApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      OpenApiVersion: "3.0"
+      Cors:
+        AllowMethods: "'POST, GET, PATCH, PUT, DELETE'"
+        AllowHeaders: "'x-api-key, get_type, post_type, delete_type, patch_type, related-id, manager-id, user-id, team-id, CardId, cardId, Groupid, GroupId, authorization, Access-Control-Request-Headers, Access-Control-Request-Method,Content-Type, Origin, Access-Control-Allow-Origin, Access-Control-Max-Age'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+      EndpointConfiguration:
+        Type: REGIONAL
+      DefinitionBody:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: "../swagger-docs/apis.yaml"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          DataTraceEnabled: true
+          LoggingLevel: INFO
+          MetricsEnabled: true
+          ThrottlingRateLimit: !Ref MapThrottlingLimit
+          ThrottlingBurstLimit: !Ref MapThrottlingBurstLimit
+      Auth:
+        ApiKeyRequired: true
+      TracingEnabled: true
+
+  CardsApiGatewayUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    # Adding CardsApiGatewayStage in order to create UsagePlan after stage is created
+    # referring to CardsApiGatewayStage (<api-name>Stage) which is the default name creation for stage in AWS
+    DependsOn:
+      - CardsApiGatewayStage
+    Properties:
+      ApiStages:
+        - ApiId: !Ref CardsApiGateway
+          Stage: !Ref Environment
+      Description: Usage plan for this API
+      # Update throttle settings based on env
+      Throttle:
+        RateLimit: !Ref MapBurstLimit
+        BurstLimit: !Ref MapRateLimit
+
+  CardsApiGatewayUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    DependsOn:
+      - CardsApiGatewayStage
+    Properties:
+      KeyId: !Ref CardsApiGatewayApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref CardsApiGatewayUsagePlan
+
+  CardsApiGatewayApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - CardsApiGatewayUsagePlan
+      - CardsApiGatewayStage
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref CardsApiGateway
+          StageName: !Ref Environment
+      Value:
+        !Join [
+          "",
+          [
+            "{{resolve:secretsmanager:",
+            !Ref GenerateSecretKey,
+            ":SecretString:apikey}}",
+          ],
+        ]
+
+  GenerateSecretKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub SecretKeyCDNAPI/${Environment}
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "getapikey"}'
+        ExcludePunctuation: true
+        GenerateStringKey: "apikey"
+        PasswordLength: 21
+
+  # --------- S3 bucket to store for content storage
+  
+  CardsStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub cards-store-${Environment}
+
+  S3CDNBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CardsStoreBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: 'PolicyForCloudFrontPrivateContent'
+        Statement:
+          - Sid: 'AllowCloudFrontServicePrincipal'
+            Effect: 'Allow'
+            Principal:
+              Service: 'cloudfront.amazonaws.com'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::cards-store-${Environment}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub
+                - 'arn:aws:cloudfront::231252353945:distribution/${CdnId}'
+                - { CdnId: !Ref CDNforCardsS3Store}
+                
+
+# ------------ Metadata DDB Table --------
+  CardsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub CardsTable-${Environment}
+      AttributeDefinitions:
+        - AttributeName: CardId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: CardId
+          KeyType: HASH
+      BillingMode: "PAY_PER_REQUEST"
+
+  # ---------- Cloudfront for cardsTemplate ----------
+
+  
+  # using openssl to generate a 2048 public key and a private key from the public key
+  PrivateKeySecretsCloudfront:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Private Key for accessing data from cloudfront
+      Name: !Sub /cloudfront/keys/private-key-images-cdn-${Environment}
+
+  CDNKeyGroup:
+    Type: AWS::CloudFront::KeyGroup
+    Properties:
+      KeyGroupConfig:
+        Comment: "This is the key group for signed URLs"
+        Items:
+          - !GetAtt CloudFrontPublicKeyId.Value # Id for the required public key. This is created outside of the Cloudformation.
+        Name: !Sub CDNKeyGroup-${Environment}
+
+  # q: Create a sample cloudformation resource for : AWS::CloudFront::OriginAccessControl
+
+  OriginAccessControlCards:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: OAC for the CDN
+        Name: !Sub OAC-CDN-Cards-${Environment}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CDNforCardsS3Store:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Origins:
+          - Id: CDNCardsS3Origin
+            DomainName: !GetAtt CardsStoreBucket.DomainName
+            OriginAccessControlId: !GetAtt OriginAccessControlCards.Id
+            S3OriginConfig:
+               OriginAccessIdentity: "" # Empty OAI as we are using OAC , Ref: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-s3originconfig.html
+        CacheBehaviors:
+          - CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Ref: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-caching-optimized
+            PathPattern: "/images/*.jpg"
+            TargetOriginId: CDNCardsS3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            TrustedKeyGroups:
+              - !Ref CDNKeyGroup
+        DefaultCacheBehavior:
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Ref: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-caching-optimized
+          TargetOriginId: CDNCardsS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+        
+ # --------------- lambda func to handle content management api's ------
+
+  
+  ManageCardTemplateLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: "Tenant Lambda for managing card templates"
+      Role: !GetAtt ManageCardTemplateLambdaRole.Arn
+      Handler: bootstrap
+      Runtime: provided.al2
+      Architectures:
+        - x86_64
+      Timeout: 300
+      CodeUri: ../lambdas/manage-s3-contents/
+      Tracing: Active
+      Environment:
+        Variables:
+          Environment: !Ref Environment
+          CARDS_BUCKET: !Ref CardsStoreBucket
+          PRIVATE_KEY_SECRET_MGR_ARN: !Ref PrivateKeySecretsCloudfront
+          PUBLIC_KEY_CLOUDFRONT_ID: !GetAtt CloudFrontPublicKeyId.Value
+          CARDS_TABLE: !Ref CardsTable
+
+  ManageCardTemplateLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CardTemplate-Lambda-Role-cdn-${Environment}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: LambdaExecution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem 
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudfront:*
+                Resource: "*" 
+
+  ManageCardTemplateLambdaInvokePermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ManageCardTemplateLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CardsApiGateway}/*

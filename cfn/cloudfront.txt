@@ -1,0 +1,18 @@
+Front end setup - Basic
+
+1) Origin domain
+
+2) Origin Access Control ( Origin access control settings (recommended))
+
+3) Default cache behavior   
+    path Patern : (*)
+    COmpress objects auto: Yes
+    Viewer: Redirect HTTP to HTTPS
+    Allowed HEADERs: GET, HEADERs
+
+    RestrictedViewer: Yes
+        Key Groups: 
+
+
+        4) cache key and origin requests: 
+            Cache policy ( Managed policy : CachingOptimized )
