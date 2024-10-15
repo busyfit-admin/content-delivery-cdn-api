@@ -234,6 +234,7 @@ Resources:
           PRIVATE_KEY_SECRET_MGR_ARN: !Ref PrivateKeySecretsCloudfront
           PUBLIC_KEY_CLOUDFRONT_ID: !GetAtt CloudFrontPublicKeyId.Value
           CARDS_TABLE: !Ref CardsTable
+          CDN_DOMAIN: !GetAtt CDNforCardsS3Store.DomainName
 
   ManageCardTemplateLambdaRole:
     Type: AWS::IAM::Role

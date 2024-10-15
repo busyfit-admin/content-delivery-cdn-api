@@ -41,6 +41,7 @@ type CardsTableTemplateService struct {
 
 	CompanyCardTemplateTable string
 	BucketName               string
+	CDNDomain                string
 
 	publicKeyId string
 	privateKey  *rsa.PrivateKey
@@ -57,24 +58,28 @@ func (svc *CardsTableTemplateService) AssignCardsService(
 	PKsSecretKeyArn string,
 	publicKeyId string,
 
-) error {
-
-	err := svc.AssignPrivatePublicKey(PKsSecretKeyArn, publicKeyId)
-	if err != nil {
-		return err
-	}
-
-	signerClient := sign.NewURLSigner(svc.publicKeyId, svc.privateKey)
+) (CardsTableTemplateService, error) {
 
 	// Assign Clients
 	svc.ctx = ctx
 	svc.dynamodbClient = ddbClient
 	svc.logger = logger
 	svc.s3ObjectClient = s3Client
-	svc.cloudfrontClient = signerClient
+
 	svc.secretMgrClient = secretMgrClient
 
-	return nil
+	err := svc.AssignPrivatePublicKey(PKsSecretKeyArn, publicKeyId)
+	if err != nil {
+		svc.logger.Printf("[ERROR] Failed to Assign Private and Public Key : %v", err)
+		return CardsTableTemplateService{}, err
+	}
+
+	signerClient := sign.NewURLSigner(svc.publicKeyId, svc.privateKey)
+	svc.cloudfrontClient = signerClient
+
+	svc.logger.Printf("Assigning Clients Completed")
+
+	return *svc, nil
 
 }
 func (svc *CardsTableTemplateService) AssignPrivatePublicKey(secretKeyArn string, publicKeyId string) error {
@@ -87,7 +92,7 @@ func (svc *CardsTableTemplateService) AssignPrivatePublicKey(secretKeyArn string
 		SecretId: aws.String(secretKeyArn),
 	}
 
-	output, err := svc.secretMgrClient.GetSecretValue(svc.ctx, &(input))
+	output, err := svc.secretMgrClient.GetSecretValue(svc.ctx, &input)
 	if err != nil {
 		svc.logger.Printf("[ERROR] Failed to retrieve data from the secret manager. Error : %v", err)
 		return err
@@ -103,6 +108,7 @@ func (svc *CardsTableTemplateService) AssignPrivatePublicKey(secretKeyArn string
 	// Parse Private Key
 	parsedPrivateKey, err := parsePrivateKey(privateKeyString)
 	if err != nil {
+		svc.logger.Printf("[ERROR] Failed to parse Private Key : %v", err)
 		return err
 	}
 	// assign Private Key in Service
@@ -118,7 +124,7 @@ func (svc *CardsTableTemplateService) AssignPrivatePublicKey(secretKeyArn string
 	return nil
 }
 func parsePrivateKey(pemPrivateKey string) (*rsa.PrivateKey, error) {
-	// Trim any leading/trailing whitespaces
+	// Trim any leading/trailing whitespace
 	pemPrivateKey = strings.TrimSpace(pemPrivateKey)
 
 	// Parse the PEM block containing the private key
@@ -128,12 +134,12 @@ func parsePrivateKey(pemPrivateKey string) (*rsa.PrivateKey, error) {
 	}
 
 	// Parse the private key from the PEM block
-	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	privateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, err
 	}
 
-	return privateKey, nil
+	return privateKey.(*rsa.PrivateKey), nil
 }
 
 func (svc *CardsTableTemplateService) PutObjectToS3(key string, imageData []byte) error {
@@ -212,7 +218,7 @@ func (svc *CardsTableTemplateService) GetMetaData(CardId string) (CardsTable, er
 // Gets Presigned URL for the Card present in the CloudFront Location.
 func (svc *CardsTableTemplateService) GetPreSignedURL(objectKey string) (string, error) {
 
-	s3URL, err := GenerateS3URL(svc.BucketName, objectKey)
+	s3URL, err := GenerateDomainURL(svc.CDNDomain, objectKey)
 	if err != nil {
 		return "", err
 	}
@@ -227,16 +233,16 @@ func (svc *CardsTableTemplateService) GetPreSignedURL(objectKey string) (string,
 	return singedURL, nil
 }
 
-// GenerateS3URL generates an S3 URL for a given bucket and key.
-func GenerateS3URL(bucket, key string) (string, error) {
-	if bucket == "" || key == "" {
-		return "", fmt.Errorf("bucket and key must be provided")
+// GenerateS3URL generates an cloudfront URL for a given domain and key.
+func GenerateDomainURL(domain, key string) (string, error) {
+	if domain == "" || key == "" {
+		return "", fmt.Errorf("domain and key must be provided")
 	}
 
 	// Encode the key to make it URL-safe
 	encodedKey := url.PathEscape(key)
 
 	// Format the S3 URL
-	s3URL := fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, encodedKey)
+	s3URL := fmt.Sprintf("https://%s/%s", domain, encodedKey)
 	return s3URL, nil
 }

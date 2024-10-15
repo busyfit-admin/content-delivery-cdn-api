@@ -20,7 +20,7 @@ import (
 var RESP_HEADERS = map[string]string{
 	"Access-Control-Allow-Origin":  "*",
 	"Access-Control-Allow-Methods": "*",
-	"Access-Control-Allow-Headers": "card-name,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Requested-With,X-Auth-Token,Referer,User-Agent,Origin,Content-Type,Authorization,Accept,Access-Control-Allow-Methods,Access-Control-Allow-Origin,Access-Control-Allow-Headers",
+	"Access-Control-Allow-Headers": "card-name,card-id,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Requested-With,X-Auth-Token,Referer,User-Agent,Origin,Content-Type,Authorization,Accept,Access-Control-Allow-Methods,Access-Control-Allow-Origin,Access-Control-Allow-Headers",
 }
 
 type Service struct {
@@ -48,13 +48,10 @@ func main() {
 	secretMgrClnt := secretsmanager.NewFromConfig(cfg)
 
 	// Company SVC Initial setup Functions
-	SVC := CardsTableTemplateService{
-		CompanyCardTemplateTable: os.Getenv("COMPANY_CARDS_TABLE"),
-		BucketName:               os.Getenv("COMPANY_CARDS_BUCKET"),
-	}
+	SVC := CardsTableTemplateService{}
 
 	// Assigns all Clients and Gets Private, Public Key's and sets it in Company Service Struct
-	err = SVC.AssignCardsService(
+	cardSvc, err := SVC.AssignCardsService(
 		ctx,
 		logger,
 		dynamodbClient,
@@ -67,11 +64,14 @@ func main() {
 		log.Fatalf("Cannot Assign Clients in Company Svc: %v\n", err)
 	}
 
-	// Manage Cards Svc Setup
+	cardSvc.CompanyCardTemplateTable = os.Getenv("CARDS_TABLE")
+	cardSvc.BucketName = os.Getenv("CARDS_BUCKET")
+	cardSvc.CDNDomain = os.Getenv("CDN_DOMAIN")
+
 	svc := Service{
 		ctx:    ctx,
 		logger: logger,
-		SVC:    *&SVC,
+		SVC:    cardSvc,
 	}
 
 	lambda.Start(svc.handleCardsEvents)
@@ -89,7 +89,7 @@ func (svc *Service) handleCardsEvents(ctx context.Context, request events.APIGat
 
 	default:
 		svc.logger.Printf("Request type not defined for ManageCardTemplate: %s", request.HTTPMethod)
-		return events.APIGatewayProxyResponse{StatusCode: 500}, nil
+		return events.APIGatewayProxyResponse{StatusCode: 500, Headers: RESP_HEADERS}, nil
 	}
 
 }
